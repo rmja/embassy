@@ -420,10 +420,12 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
             });
         }
 
-        let tx_request = self.txdma.request();
-        let tx_dst = T::REGS.tx_ptr();
-        unsafe { self.txdma.start_write(tx_request, data, tx_dst, Default::default()) }
-        let tx_f = Transfer::new(&mut self.txdma);
+        let tx_f = {
+            let tx_request = self.txdma.request();
+            let tx_dst = T::REGS.tx_ptr();
+            unsafe { self.txdma.start_write(tx_request, data, tx_dst, Default::default()) }
+            Transfer::new(&mut self.txdma)
+        };
 
         unsafe {
             set_txdmaen(T::REGS, true);
@@ -466,67 +468,19 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
 
         let clock_byte_count = data.len();
 
-        let rx_request = self.rxdma.request();
-        let rx_src = T::REGS.rx_ptr();
-        unsafe { self.rxdma.start_read(rx_request, rx_src, data, Default::default()) };
-        let rx_f = Transfer::new(&mut self.rxdma);
+        let rx_f = {
+            let rx_request = self.rxdma.request();
+            let rx_src = T::REGS.rx_ptr();
+            unsafe { self.rxdma.start_read(rx_request, rx_src, data, Default::default()) };
+            Transfer::new(&mut self.rxdma)
+        };
 
-        let tx_request = self.txdma.request();
-        let tx_dst = T::REGS.tx_ptr();
-        let clock_byte = 0x00u8;
-        let tx_f = crate::dma::write_repeated(&mut self.txdma, tx_request, clock_byte, clock_byte_count, tx_dst);
-
-        unsafe {
-            set_txdmaen(T::REGS, true);
-            T::REGS.cr1().modify(|w| {
-                w.set_spe(true);
-            });
-            #[cfg(any(spi_v3, spi_v4))]
-            T::REGS.cr1().modify(|w| {
-                w.set_cstart(true);
-            });
-        }
-
-        join(tx_f, rx_f).await;
-
-        finish_dma(T::REGS);
-
-        Ok(())
-    }
-
-    async fn transfer_inner<W: Word>(&mut self, read: *mut [W], write: *const [W]) -> Result<(), Error>
-    where
-        Tx: TxDma<T>,
-        Rx: RxDma<T>,
-    {
-        let (_, rx_len) = slice_ptr_parts(read);
-        let (_, tx_len) = slice_ptr_parts(write);
-        assert_eq!(rx_len, tx_len);
-        if rx_len == 0 {
-            return Ok(());
-        }
-
-        self.set_word_size(W::WORDSIZE);
-        unsafe {
-            T::REGS.cr1().modify(|w| {
-                w.set_spe(false);
-            });
-            set_rxdmaen(T::REGS, true);
-        }
-
-        // SPIv3 clears rxfifo on SPE=0
-        #[cfg(not(any(spi_v3, spi_v4)))]
-        flush_rx_fifo(T::REGS);
-
-        let rx_request = self.rxdma.request();
-        let rx_src = T::REGS.rx_ptr();
-        unsafe { self.rxdma.start_read(rx_request, rx_src, read, Default::default()) };
-        let rx_f = Transfer::new(&mut self.rxdma);
-
-        let tx_request = self.txdma.request();
-        let tx_dst = T::REGS.tx_ptr();
-        unsafe { self.txdma.start_write(tx_request, write, tx_dst, Default::default()) }
-        let tx_f = Transfer::new(&mut self.txdma);
+        let tx_f = {
+            let tx_request = self.txdma.request();
+            let tx_dst = T::REGS.tx_ptr();
+            let clock_byte = 0x00u8;
+            crate::dma::write_repeated(&mut self.txdma, tx_request, clock_byte, clock_byte_count, tx_dst)
+        };
 
         unsafe {
             set_txdmaen(T::REGS, true);
@@ -551,7 +505,53 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         Tx: TxDma<T>,
         Rx: RxDma<T>,
     {
-        self.transfer_inner(read, write).await
+        assert_eq!(read.len(), write.len());
+        if read.len() == 0 {
+            return Ok(());
+        }
+
+        self.set_word_size(W::WORDSIZE);
+        unsafe {
+            T::REGS.cr1().modify(|w| {
+                w.set_spe(false);
+            });
+            set_rxdmaen(T::REGS, true);
+        }
+
+        // SPIv3 clears rxfifo on SPE=0
+        #[cfg(not(any(spi_v3, spi_v4)))]
+        flush_rx_fifo(T::REGS);
+
+        let rx_f = {
+            let rx_request = self.rxdma.request();
+            let rx_src = T::REGS.rx_ptr();
+            unsafe { self.rxdma.start_read(rx_request, rx_src, read, Default::default()) };
+            Transfer::new(&mut self.rxdma)
+        };
+
+        let tx_f = {
+            let tx_request = self.txdma.request();
+            let tx_dst = T::REGS.tx_ptr();
+            unsafe { self.txdma.start_write(tx_request, write, tx_dst, Default::default()) }
+            Transfer::new(&mut self.txdma)
+        };
+
+        unsafe {
+            set_txdmaen(T::REGS, true);
+            T::REGS.cr1().modify(|w| {
+                w.set_spe(true);
+            });
+            #[cfg(any(spi_v3, spi_v4))]
+            T::REGS.cr1().modify(|w| {
+                w.set_cstart(true);
+            });
+        }
+
+        join(tx_f, rx_f).await;
+
+        finish_dma(T::REGS);
+
+        Ok(())
     }
 
     pub async fn transfer_in_place<W: Word>(&mut self, data: &mut [W]) -> Result<(), Error>
@@ -559,7 +559,52 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         Tx: TxDma<T>,
         Rx: RxDma<T>,
     {
-        self.transfer_inner(data, data).await
+        if data.len() == 0 {
+            return Ok(());
+        }
+
+        self.set_word_size(W::WORDSIZE);
+        unsafe {
+            T::REGS.cr1().modify(|w| {
+                w.set_spe(false);
+            });
+            set_rxdmaen(T::REGS, true);
+        }
+
+        // SPIv3 clears rxfifo on SPE=0
+        #[cfg(not(any(spi_v3, spi_v4)))]
+        flush_rx_fifo(T::REGS);
+
+        let rx_f = {
+            let rx_request = self.rxdma.request();
+            let rx_src = T::REGS.rx_ptr();
+            unsafe { self.rxdma.start_read(rx_request, rx_src, data, Default::default()) };
+            Transfer::new(&mut self.rxdma)
+        };
+
+        let tx_f = {
+            let tx_request = self.txdma.request();
+            let tx_dst = T::REGS.tx_ptr();
+            unsafe { self.txdma.start_write(tx_request, data, tx_dst, Default::default()) }
+            Transfer::new(&mut self.txdma)
+        };
+
+        unsafe {
+            set_txdmaen(T::REGS, true);
+            T::REGS.cr1().modify(|w| {
+                w.set_spe(true);
+            });
+            #[cfg(any(spi_v3, spi_v4))]
+            T::REGS.cr1().modify(|w| {
+                w.set_cstart(true);
+            });
+        }
+
+        join(tx_f, rx_f).await;
+
+        finish_dma(T::REGS);
+
+        Ok(())
     }
 
     pub fn blocking_write<W: Word>(&mut self, words: &[W]) -> Result<(), Error> {

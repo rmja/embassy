@@ -249,7 +249,7 @@ mod transfers {
         repeated: W,
         count: usize,
         reg_addr: *mut W,
-    ) -> impl Future<Output = ()> + 'a {
+    ) -> impl Future<Output = ()> + Send + 'a {
         into_ref!(channel);
 
         unsafe { channel.start_write_repeated::<W>(request, repeated, count, reg_addr, Default::default()) };
@@ -289,7 +289,7 @@ mod transfers {
     }
 }
 
-pub trait Channel: sealed::Channel + Peripheral<P = Self> + 'static {}
+pub trait Channel: sealed::Channel + Peripheral<P = Self> + Send + 'static {}
 
 pub struct NoDma;
 
